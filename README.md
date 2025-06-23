@@ -1,32 +1,72 @@
-# Mintlify Starter Kit
+# KAPSULA
 
-Click on `Use this template` to copy the Mintlify starter kit. The starter kit contains examples including
+This is a KAPSULA protocol description that is designed to provide a TRULY independent, censorship and blocking resistant way to send messages via internet and sometimes even without an internet connection.
 
-- Guide pages
-- Navigation
-- Customizations
-- API Reference pages
-- Use of popular components
+In order to maintain a connection via the server, users need to know each other's X25519 public keys, which they can exchange using any off-grid or online method (QR code, NFC, link by email, DNS, or any other method).
 
-### Development
+## MSS servers
 
-Install the [Mintlify CLI](https://www.npmjs.com/package/mintlify) to preview the documentation changes locally. To install, use the following command
+The Kapsula project provides high-capacity servers to enable people to communicate with each other. If you prefer to run your own MSS node, you can either order one on the KAPSULA website or run a self-hosted one. Balancing between privacy, performance, and ease of use can easily be achieved.
 
-```
-npm i -g mintlify
-```
+## Discovering the server
 
-Run the following command at the root of your documentation (where docs.json is)
+Anyone who wants to send a message via KAPSULA needs the ability to make DNS lookups or DNS over TLS/DNS over HTTPS lookups. In case of concerns about ISP or any transit hop security, you should always prefer DoT or DoH and/or support DNSSEC.
 
-```
-mintlify dev
-```
+The protocol itself provides the ability to use any domain name to resolve the contact, while the KAPSULA project provides the default domain name of **\*.kapsula.name**. However, you can use any domain name you control. By default, the KAPSULA project doesn't provide any short names, like alice.kapsula.name, because of spam concerns, but you can use any name you like with your own domain, keeping in mind that easier discovery leads to easier spam delivery.
 
-### Publishing Changes
+## Obtaining chat id
 
-Install our Github App to auto propagate changes from your repo to your deployment. Changes will be deployed to production automatically after pushing to the default branch. Find the link to install on your dashboard. 
+Alice is the initiator, Bob is the contact.
 
-#### Troubleshooting
+1. Alice sends a `/request` POST to the server, sending her public key, Bob's public key, and any AES-GCM encrypted information in the POST body that helps Bob understand who is trying to contact him.
+2. Initially, Alice's first request results in a 423 HTTP status because of the server's flood control system activation. Alice receives a challenge that must be used to compute, in conjunction with an arbitrary nonce value, a sha256 value whose first N bits must be zero (N comes from the server). This is a Proof of Work (PoW) that prevents automatic exhaustion of server resources. The server controls the number of challenges and may react in case of DoS attempts. Typical PoW problem resolution time is about 2-3 seconds using a modern mobile chip. The system may increase the problem complexity by requiring more than 22 leading zero bits if it suspects someone is performing a spam attack. This should not impose any restrictions on the normal communication process and should significantly increase the cost of an attack.
+3. Alice should calculate the corresponding sha256 value and use the nonce value to send the `/request` POST again. This time, Alice's invitation to Bob will be created and a push message will be sent to Bob. This message contains a random nonce value that Bob must present in the next step.
+4. Bob receives the message, reviews it, and either ignores it or sends an `/accept` POST to the server, using the timestamp and nonce values he received in the previous step.
+5. If Bob accepts the invitation, both he and Alice (via push message) receive a chat id value that must be used when exchanging messages.
 
-- Mintlify dev isn't running - Run `mintlify install` it'll re-install dependencies.
-- Page loads as a 404 - Make sure you are running in a folder with `docs.json`
+> On platforms where push notifications are not available, KAPSULA provides its own push infrastructure based on the KAPSULA Push Server System (PSS).
+
+## Sending a message
+
+1. Alice must resolve Bob's server address again, because Kapsula maintains very short DNS TTL to be able to replace faulty servers.
+2. Message size is strictly limited to 4096 bytes. If the message exceeds the limit, it must be split into chunks, each of which must be 4096 bytes or less. The message is sent as an AES-GCM encrypted POST payload to the `/messages`endpoint.
+3. An ed25519 signature should be calculated for the ENCRYPTED payload and sent with each of the chunks.
+
+## Storing messages
+
+Messages are stored differently based on their freshness. Very new messages are kept in a hot MSS cache, while older ones are archived to warm storage, which is cheaper but less fast. By default, MSS keeps the most recent 1024 messages in the hot cache. This amount can be managed through environment variables on the running MSS.
+
+## Client State Management
+
+Since MSS servers can be distributed across thousands of instances, clients need a way to discover which servers contain their active chats, especially when setting up on a new device.
+
+### State Backup
+
+1. After adding each new chat, the client SHOULD update and backup its state containing the list of active chats and their corresponding servers.
+2. For central MSS servers, the encrypted state is stored in the KAPSULA project's centralized S3 storage.
+3. For self-hosted MSS servers, the encrypted state is stored locally on the MSS server itself.
+4. The state backup includes:
+   - Version number (incremented with each update)
+   - User's public key
+   - List of active chats with their server locations
+   - Timestamp of last update
+   - ed25519 signature of the entire state
+
+### State Discovery for New Clients
+
+1. When a client starts on a new device, it SHOULD query known servers for the latest state backup using `GET /state-backup?pubkey={hash}`.
+2. If multiple servers return state backups, the client SHOULD verify signatures and use the version with the highest version number.
+3. The client then uses the discovered server list to retrieve chat metadata and messages.
+
+### State Change Notifications
+
+1. When client state changes (new chat added, server changed), PSS sends a push notification to all user devices: `{"type": "state_changed", "version": N, "hint_server": "server.example.com"}`.
+2. Other clients receive this notification, compare the version with their local state, and download the updated state if needed.
+3. The `hint_server` field suggests which server to query first for the updated state.
+
+## Receiving messages
+
+1. The client application SHOULD effectively store messages locally.
+2. On first run, the client application SHOULD obtain the chat list and metadata for all chats on the list by first discovering active servers through the state backup mechanism described above.
+3. Next, the client application SHOULD retrieve recent messages for all chats in descending order by recent message time.
+4. When scrolling up to the chat start, the client application MAY retrieve older messages. Sometimes, when the app hits the range of the hot cache, MSS can return a PARTIAL CONTENT response containing messages from the hot cache and a job id for retrieving the rest of the messages when they are downloaded from warm storage. MSS sends a silent push through PSS to notify the client app of job completion. If the range of requested messages is completely outside the hot cache, the client app receives a NO CONTENT response and a job id. When the client app receives notification of job completion, it may download the messages. Until all messages are retrieved, the client app MAY show a loading indicator to the user.
